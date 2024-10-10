@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="description"
+        content="LLMs Are In-Context Reinforcement Learners">
+  <meta name="keywords" content="LLMs, ICL, ICRL">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLMs Are In-Context Reinforcement Learners</title>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+        rel="stylesheet">
+
+  <link rel="stylesheet" href="./static/css/bulma.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="./static/css/index.css">
+  <link rel="icon" href="./static/images/favicon.svg">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="./static/js/fontawesome.all.min.js"></script>
+  <script src="./static/js/bulma-carousel.min.js"></script>
+  <script src="./static/js/bulma-slider.min.js"></script>
+  <script src="./static/js/index.js"></script>
+</head>
+<body>
+
+
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-widescreen">
+      <div class="columns is-centered">
+        <div class="column has-text-centered">
+          <h1 class="title is-1 publication-title">LLMs Are In-Context Reinforcement Learners</h1>
+          <div class="is-size-5 publication-authors">
+            <span class="author-block">
+              Giovanni Monea</a><sup>1</sup>,</span>
+            <span class="author-block">
+              Antoine Bosselut</a><sup>2</sup>,</span>
+            <span class="author-block">
+              Kianté Brantley<sup>3</sup>,
+            </span>
+            <span class="author-block">
+              Yoav Artzi<sup>1</sup>
+            </span>
+          </div>
+
+          <div class="is-size-5 publication-authors">
+            <span class="author-block"><sup>1</sup>Cornell University,</span>
+            <span class="author-block"><sup>2</sup>EPFL,</span>
+            <span class="author-block"><sup>3</sup>Harvard University</span>
+          </div>
+
+          <div class="column has-text-centered">
+            <div class="publication-links">
+              <!-- PDF Link. -->
+              <span class="link-block">
+                <a href="https://arxiv.org/pdf/2410.05362"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                  </span>
+                  <span>Paper</span>
+                </a>
+              </span>
+              <span class="link-block">
+                <a href="https://arxiv.org/abs/2410.05362"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="ai ai-arxiv"></i>
+                  </span>
+                  <span>arXiv</span>
+                </a>
+              </span>
+              <!-- Code Link. -->
+              <span class="link-block">
+                <a href="https://github.com/lil-lab/icrl/tree/main"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fab fa-github"></i>
+                  </span>
+                  <span>Code</span>
+                  </a>
+              </span>
+              <!-- Dataset Link. -->
+              <span class="link-block">
+                <a href="https://drive.google.com/file/d/1Ot0hkOrBSkDrWY0SPTRpNEJnjLoM4Yyb/view?usp=sharing"
+                   class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                      <i class="fas fa-database"></i>
+                  </span>
+                  <span>Data</span>
+                  </a>
+            </div>
+          </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-widescreen">
+    <!-- Abstract. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Abstract</h2>
+        <div class="content has-text-justified">
+          <p>
+            Large Language Models (LLMs) can learn new tasks through in-context supervised learning (i.e., ICL). This work studies if this ability extends to in-context reinforcement learning (ICRL), where models are not given gold labels in context, but only their past predictions and rewards. We show that a naive application of ICRL fails miserably, and identify the root cause as a fundamental deficiency at exploration, which leads to quick model degeneration. We propose an algorithm to address this deficiency by increasing test-time compute, as well as a compute-bound approximation. We use several challenging classification tasks to empirically show that our ICRL algorithms lead to effective learning from rewards alone, and analyze the characteristics of this ability and our methods. Overall, our results reveal remarkable ICRL abilities in LLMs. 
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Abstract. -->
+
+    <!-- Paper video. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3"></h2>
+        <div class="publication-banner">
+          
+          <figure>
+            <img src="./static/images/abstract-image.png" alt="LLMs Are In-Context Reinforcement Learners" width="80%">
+            <figcaption>Illustration of in-context reinforcement learning</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+    <!--/ Paper video. -->
+  </div>
+</section>
+
+
+<section class="section">
+  <div class="container is-max-widescreen">
+    <!-- Method. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Method</h2>
+        <div class="content has-text-justified">
+          <p>
+            This work explores how large language models (LLMs) can learn in context using reinforcement learning (ICRL), rather than the more traditional in-context learning (ICL) based on supervised learning. While ICL relies on providing models with correct input-output demonstrations, ICRL introduces a new approach where the model generates predictions and learns from reward signals it receives after each interaction.
+
+            We outline three approaches to ICRL:
+            <ul>
+              <li>
+                <b>Naive Implementation:</b> Uses all past episodes in the model’s context. This approach quickly leads to degeneration.
+              </li>
+              <li>
+                <b>Explorative Approach:</b> Samples a subset of past episodes and uses only positive reward signals. We demonstrate that this approach addresses the limitations of the naive implementation.
+              </li>
+              <li>
+                <b>Approximate Method:</b> Balances exploration with computational efficiency by maintaining a limited set of potential contexts that can only grow.
+              </li>
+            </ul>          
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Method. -->
+
+  </div>
+</section>
+
+<section class="section">
+  <div class="container is-max-widescreen">
+
+    <!-- Results. -->
+    <div class="columns is-centered has-text-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3">Results</h2>
+
+              <!-- Paper video. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-four-fifths">
+          <h2 class="title is-3"></h2>
+          <div class="publication-banner">
+            
+            <figure>
+              <img src="./static/images/main_results.png" width="100%">
+              <figcaption>Main results</figcaption>
+            </figure>
+          </div>
+        </div>
+        </div>
+        <!--/ Paper video. -->
+        <div class="content has-text-justified">
+          <p>
+            Explorative ICRL significantly improves over zero-shot performance across all tasks and models. For example, with Llama 3.1 8B Instruct, Explorative ICRL boosts accuracy over zero-shot by +48.8% in Banking77, +56.8% in CLINIC150, and +36.8% in NLU. In comparison, Phi 3.5 Mini sees gains of +46.2% in Banking77 and +55.2% in CLINIC150. Naive ICRL generally performs worse than zero-shot, failing to explore effectively, showing that it is not sufficient for in-context reinforcement learning. Approximate ICRL performs comparably to Explorative ICRL with Llama 3.1 8B Instruct but struggles with Phi 3.5 Mini, requiring less approximation to avoid degeneration. Overall, Explorative ICRL demonstrates continual improvement and effective in-context learning from rewards alone.       
+          </p>
+        </div>
+      </div>
+    </div>
+    <!--/ Results. -->
+  </div>
+</section>
+
+
+<section class="section" id="BibTeX">
+  <div class="container is-max-widescreen content">
+    <h2 class="title">BibTeX</h2>
+    <pre><code>Not available yet</code></pre>
+  </div>
+</section>
+
+
+
+
+<footer class="footer">
+  <div class="container">
+    <div class="content has-text-centered">
+      <p>
+        <centered>
+          Template <a href="https://nerfies.github.io/">source</a> by <a href="https://keunhong.com/">Keunhong Park</a>.
+        </centered>
+      </p>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -26,7 +26,7 @@ If you find this work useful for your research, please consider citing:
 
 ```bash
 conda create --name icrl --file spec-file.txt
-activate icrl
+conda activate icrl
 ```
 
 ### Install dependencies
@@ -641,7 +641,7 @@ This outputs the number of tokens used for each experiment in the main results p
 ## Make plots
 
 The following steps can be followed to generate the plots used in the paper:
-1. Download the data from `omitted link`.
+1. Download the data from [here](https://cornell.box.com/s/mugw39qran8x9ezxz6dj1l24dxtytn77 ).
 2. Extract the data folder.
 3. Put the data folder in the root directory of the project.
 4. Run the plots script:

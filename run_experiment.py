@@ -18,7 +18,7 @@ from src.utils.logger import get_logger
 from time import time
 
 def init_wandb(run_name: str = None):
-    wandb.init(project="iclf", name=run_name)
+    wandb.init(project="iclf", name=run_name, mode="offline")
 
 
 def get_args():
@@ -27,7 +27,7 @@ def get_args():
     parser.add_argument("--task_name",type=str)
     parser.add_argument("--context_strategy_name", type=str)
     parser.add_argument("--temperature", type=float)
-    parser.add_argument("--context_p_keep", type=float)
+    parser.add_argument("--context_p_keep", type=float, default=1.0)
     parser.add_argument("--max_context_examples", type=int, default=None)
     parser.add_argument("--icrl", action=argparse.BooleanOptionalAction)
     parser.add_argument("--icrl_omit_feedback", action=argparse.BooleanOptionalAction)
@@ -38,6 +38,10 @@ def get_args():
     parser.add_argument("--train_k", type=int)
     parser.add_argument("--test_every", type=int)
     parser.add_argument("--test_k", type=int)
+    parser.add_argument("--exemplars_per_label", type=int, default=0)
+    parser.add_argument("--ucb_alpha", type=float, default=1.0)
+    parser.add_argument("--prob_reset", type=float, default=0.0)
+    parser.add_argument("--p_exploration", type=float, default=0.0)
     parser.add_argument("--debug_k", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--training_seed", type=int)
@@ -85,8 +89,11 @@ def main():
     model.set_task(task)
 
     # Load data
-    training_size = args.train_k if args.max_context_examples != 0 else 0 # If we are doing zero shot, we don't need any training data
-    training_data = task.get_training_data(size=training_size, seed=args.training_seed) 
+    exemplar_data = None
+    if args.exemplars_per_label > 0:
+        exemplar_data = task.get_exemplar_data(exemplars_per_label=args.exemplars_per_label, seed=args.training_seed)
+    training_data = task.get_training_data(size=args.train_k if args.max_context_examples != 0 else 0, seed=args.training_seed) # If we are doing zero shot, we don't need any training data
+    training_size = len(training_data)
     test_data = task.get_test_data(size=args.test_k, seed=args.test_seed)
 
     get_logger().info(f"Training data size: {len(training_data)}")
@@ -94,6 +101,11 @@ def main():
 
     steps = training_size if args.max_context_examples != 0 else 1
     steps_to_test = [0] + [i for i in range(steps) if (i+1) % args.test_every == 0]
+    
+    # With exemplars we remove some data from the training as we use it for the exemplars
+    # We still want to test at the last step even in this case
+    if steps-1 not in steps_to_test:
+        steps_to_test += [steps-1]
 
 
     debug_k = 0
@@ -108,10 +120,18 @@ def main():
         else: # when specified 
             max_context_examples = args.max_context_examples
 
+        get_logger().info(f"Max context examples: {max_context_examples}")
+        
+        # If exemplars are used, decrease the number of max_context examples properly
+        if exemplar_data:
+            max_context_examples = max(0, max_context_examples - len(exemplar_data))
+            get_logger().info(f"Max context examples after accounting for exemplars: {max_context_examples}")
+
         # If standard ICL, we stop at the minimum test step bigger or equal to the number of maximum context examples
         if not args.icrl:
-            last_step = min([step for step in steps_to_test if step >= max_context_examples])
-            steps = last_step + 1
+            earlier_last_step = min([step for step in steps_to_test if step >= max_context_examples], default=None)
+            if earlier_last_step is not None:
+                steps = earlier_last_step + 1
 
         # Load context generator
         context_generator: ContextGenerator = load_context_generator(
@@ -120,11 +140,24 @@ def main():
             p_keep=args.context_p_keep,
             max_contexts=args.max_contexts,
             approximate_context_sampling_method=args.approximate_context_sampling_method,
+            ucb_alpha=args.ucb_alpha,
+            prob_reset=args.prob_reset,
+            p_exploration=args.p_exploration,
             verbose=args.verbose
         )
 
         training_task_prompt_list, training_model_prediction_list, training_task_feedback_list, training_task_answer_list, training_accuracies = [], [], [], [], []
         
+        exemplar_task_prompt_list, exemplar_model_prediction_list, exemplar_task_feedback_list, exemplar_task_answer_list, exemplar_accuracies = [], [], [], [], []
+        if exemplar_data:
+            # Add exemplars 
+            for exemplar in exemplar_data:
+                exemplar_task_prompt_list.append(task.get_prompt(exemplar))
+                exemplar_model_prediction_list.append(task.get_answer(exemplar))
+                exemplar_task_feedback_list.append(1.0)
+                exemplar_task_answer_list.append(task.get_answer(exemplar))
+                exemplar_accuracies.append(1.0)
+
         get_logger().info("Starting experiment")
 
         tik = time()
@@ -148,7 +181,7 @@ def main():
                 # If we need to perform a training or test step and this is not zero shot, we need to refresh the model cache
                 if max_context_examples > 0:
                     icl_task_prompt_list, icl_model_prediction_list, icl_task_feedback_list, icl_task_answer_list, icl_task_accuracies = step_data.get_context()
-                    model.refresh_cache(icl_task_prompt_list, icl_model_prediction_list if args.icrl else [], icl_task_feedback_list if (args.icrl and not args.icrl_omit_feedback) else [], icl_task_answer_list if not args.icrl else [])
+                    model.refresh_cache(exemplar_task_prompt_list + icl_task_prompt_list, exemplar_model_prediction_list + icl_model_prediction_list if args.icrl else [], exemplar_task_feedback_list + icl_task_feedback_list if (args.icrl and not args.icrl_omit_feedback) else [], exemplar_task_answer_list + icl_task_answer_list if not args.icrl else [])
 
                 if not step_data.training_step_processed():
                     train_example = training_data[step]

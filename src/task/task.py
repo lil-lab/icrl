@@ -7,6 +7,7 @@ from src.utils.logger import get_logger
 from datasets import load_dataset, Dataset, DatasetDict
 
 import random
+import re
 
 class Task(ABC):
     """
@@ -15,9 +16,11 @@ class Task(ABC):
     """
     training_split = None
     test_split = None
+    id_to_label = None
     labels = None
     description = ""
     prediction_prefix = "Answer:"
+    label_name = None
 
     def __init__(self, verbose: bool):
         """
@@ -90,7 +93,6 @@ class Task(ABC):
 
         return feedback
 
-    @abstractmethod
     def get_answer(self, entry) -> str:
         """
         Get the answer for a given entry.
@@ -101,7 +103,72 @@ class Task(ABC):
         Returns:
             str: The answer.
         """
-        pass
+        assert self.id_to_label is not None
+        assert self.label_name is not None
+        return self.id_to_label[entry[self.label_name]]
+
+
+    def get_exemplar_data(self, exemplars_per_label: int, seed: int):
+        """
+        Get exemplars data for the task.
+
+        Args:
+            exemplars_per_label (int): The number of exemplars to select per label.
+            seed (int): The seed for random shuffling.
+
+        Returns:
+            Dataset: The exemplars data.
+        """
+        # Initialize exemplars data if not already done
+        if not hasattr(self, '_exemplars_data'):
+            # Get training data
+            train_data = self.data[self.training_split]
+            
+            # Create dictionaries to store exemplars and remaining data
+            exemplars = []
+            remaining_data = []
+            label_counts = dict()
+            for label_id in self.id_to_label.keys():
+                label_counts[label_id] = 0
+
+            get_logger().info("Id_to_label", self.id_to_label)
+
+            # Set random seed for reproducibility
+            random.seed(seed)
+            
+            # Randomly shuffle data first
+            shuffled_data = list(train_data)
+            random.shuffle(shuffled_data)
+
+            # Go through shuffled data to select exemplars
+            for example in shuffled_data:
+                label_id = example[self.label_name]
+                if label_counts[label_id] < exemplars_per_label:
+                    # Add to exemplars if we need more of this label
+                    exemplars.append(example)
+                    label_counts[label_id] += 1
+                else:
+                    # Add to remaining training data if we have enough exemplars
+                    remaining_data.append(example)
+
+            # Log classes that don't have enough exemplars
+            insufficient_labels = []
+            for label_id, count in label_counts.items():
+                if count < exemplars_per_label:
+                    insufficient_labels.append(f"{self.id_to_label[label_id]} ({count}/{exemplars_per_label})")
+            
+            if insufficient_labels:
+                get_logger().warning(f"Not enough exemplars for labels: {', '.join(insufficient_labels)}")
+            else:
+                get_logger().info(f"Found {exemplars_per_label} exemplars for all labels")
+
+            # Update training split to exclude exemplars
+            self.data[self.training_split] = Dataset.from_list(remaining_data)
+
+            # Store exemplars dataset
+            self._exemplars_data = Dataset.from_list(exemplars)
+
+        return self._exemplars_data
 
     def get_training_data(self, size: int, seed: int):
         """
@@ -153,7 +220,10 @@ class Task(ABC):
             result = shuffled_data
         else:
             result = shuffled_data[:size]
-            assert len(result) == size
+            if len(result) == size:
+                get_logger().info(f"Length of data ({len(result)}) matches requested size ({size})")
+            else:
+                get_logger().info(f"Length of data ({len(result)}) does not match requested size ({size})")
         
         # Count the occurrences of each label in the result
         label_counts = Counter(self.get_answer(example) for example in result)
@@ -166,6 +236,59 @@ class Task(ABC):
         get_logger().info(f"Dataset size: {len(result)}")
         
         return Dataset.from_list(result)
+    
+    def make_unsemantic(self):
+        """
+        Make the task unsemantic by updating the id_to_labels and labels.
+        """
+        # Update the id_to_label dictionary in place with generic labels
+        for id in self.id_to_label.keys():
+            self.id_to_label[id] = f"label_{1000+id}"
+
+        # Update the labels list
+        self.labels = list(self.id_to_label.values())
+
+        # Update labels in the data
+        self.data = self.data.map(lambda example: {**example, self.label_name: example[self.label_name]})
+
+        # Show new labels
+        get_logger().info(f"New labels: {self.labels}")
+
+    def include_most_frequent(self, k):
+        """
+        Include only the most frequent labels in the dataset.
+
+        Args:
+            k (int): The number of most frequent labels to include.
+        """
+        # Filter the data to only include the most frequent labels
+        label_counts = Counter([entry[self.label_name] for entry in self.data[self.training_split]])
+        most_frequent_labels = [label for label, _ in label_counts.most_common(k)]
+
+        # Filter out entries with labels not in the most frequent list
+        self.data = self.data.filter(lambda x: x[self.label_name] in most_frequent_labels)
+
+        # Update id_to_label to have sequential IDs for remaining labels
+        old_to_new_id = {}
+        new_id = 0
+        for old_id, label in self.id_to_label.items():
+            if label in most_frequent_labels:
+                old_to_new_id[old_id] = new_id
+                new_id += 1
+
+        # Create new id_to_label with sequential IDs
+        self.id_to_label = {new_id: self.id_to_label[old_id] 
+                           for old_id, new_id in old_to_new_id.items()}
+
+        # Update labels list
+        self.labels = list(self.id_to_label.values())
+
+        # Show size of the filtered dataset
+        for split in [self.training_split, self.test_split]:
+            get_logger().info(f"Filtered {split} dataset size: {len(self.data[split])}")
+        
+    
+
 
 def load_task(task_name: str, verbose: bool) -> Task:
     """
@@ -181,18 +304,30 @@ def load_task(task_name: str, verbose: bool) -> Task:
     Raises:
         ValueError: If the task name is not supported.
     """
-    if task_name == "trec_coarse":
-        return TRECCoarseTask(verbose=verbose)
-    elif task_name == "trec_fine":
-        return TRECFineTask(verbose=verbose)
-    elif task_name == "banking77":
-        return BANKING77Task(verbose=verbose)
-    elif task_name == "clinic150":
-        return CLINIC150_Task(verbose=verbose)
-    elif task_name == "nlu":
-        return NLU(verbose=verbose)
-    else:
+    task_mapping = {
+        "trec_coarse": TRECCoarseTask,
+        "trec_fine": TRECFineTask,
+        "banking77": BANKING77Task,
+        "clinic150": CLINIC150_Task,
+        "nlu": NLU
+    }
+
+    base_task_name = re.sub(r'_(?:top\d+|unsemantic).*$', '', task_name)
+    task_class = task_mapping.get(base_task_name)
+
+    if task_class is None:
         raise ValueError(f"Task {task_name} not supported")
+
+    task = task_class(verbose=verbose)
+
+    if '_top' in task_name:
+        k = int(re.search(r'_top(\d+)', task_name).group(1))
+        task.include_most_frequent(k)
+
+    if "unsemantic" in task_name:
+        task.make_unsemantic()
+
+    return task
 
 
 class TRECTask(Task, ABC):
@@ -285,55 +420,23 @@ class TRECTask(Task, ABC):
         """
         prompt = f"Question: {entry['text']}"
         return prompt
-    
-    @abstractmethod
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
-
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        pass
 
 class TRECCoarseTask(TRECTask):
     """
     TREC coarse task.
     """
-    labels = list(TRECTask.coarse_id_to_label.values())
-
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
-
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        return self.coarse_id_to_label[entry["coarse_label"]]
+    label_name = "coarse_label"
+    id_to_label = TRECTask.coarse_id_to_label
+    labels = list(id_to_label.values())
+    
 
 class TRECFineTask(TRECTask):
     """
     TREC fine task.
     """
-    labels = list(TRECTask.fine_id_to_label.values())
-
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
-
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        return self.fine_id_to_label[entry["fine_label"]]
+    label_name = "fine_label"
+    id_to_label = TRECTask.fine_id_to_label
+    labels = list(id_to_label.values())
     
 
 class BANKING77Task(Task):
@@ -422,6 +525,7 @@ class BANKING77Task(Task):
         76: 'wrong exchange rate for cash withdrawal'
     }
     labels = list(id_to_label.values())
+    label_name = "label"
     prediction_prefix = "Intent:"
    
     def __init__(self, verbose: bool):
@@ -446,18 +550,7 @@ class BANKING77Task(Task):
         """
         prompt = f"Query: {entry['text']}"
         return prompt
-   
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
 
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        return self.id_to_label[entry["label"]]
     
 class CLINIC150_OOS_Task(Task):
     """
@@ -621,6 +714,7 @@ class CLINIC150_OOS_Task(Task):
         150: 'change volume'
     }
     labels = list(id_to_label.values())
+    label_name = "intent"
    
     def __init__(self, verbose: bool):
         """
@@ -644,18 +738,6 @@ class CLINIC150_OOS_Task(Task):
         """
         prompt = f"Query: {entry['text']}"
         return prompt
-   
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
-
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        return self.id_to_label[entry["intent"]]
 
 
 class CLINIC150_Task(CLINIC150_OOS_Task):
@@ -671,8 +753,26 @@ class CLINIC150_Task(CLINIC150_OOS_Task):
         """
         super().__init__(verbose)
         
-        self.data = self.data.filter(lambda example: self.get_answer(example) != "oos")
-        self.labels = [label for label in self.labels if label != "oos"]
+        # Identify the "oos" label id
+        oos_id = next((old_id for old_id, label in self.id_to_label.items() if label == "oos"), None)
+
+        # Assert it is not none
+        assert oos_id is not None
+
+        # Create a new id_to_label dictionary excluding "oos"
+        filtered_labels = [(old_id, label) for old_id, label in self.id_to_label.items() if old_id != oos_id]
+        self.id_to_label = {new_id: label for new_id, (old_id, label) in enumerate(filtered_labels)}
+
+        # Update the labels list
+        self.labels = list(self.id_to_label.values())
+
+        # Map data to new label ids
+        old_to_new_id = {old_id: new_id for new_id, (old_id, label) in enumerate(filtered_labels)}
+
+        # Filter out entries with the "oos" label and update labels
+        self.data = self.data.filter(lambda x: x[self.label_name] != oos_id).map(lambda example: {**example, self.label_name: old_to_new_id[example[self.label_name]]})
+
+
 class NLU(Task):
     """
     NLU task.
@@ -751,6 +851,7 @@ class NLU(Task):
         67: 'weather query'
     }   
     labels = list(id_to_label.values())
+    label_name = "label"
 
     def __init__(self, verbose: bool):
         """
@@ -786,14 +887,3 @@ class NLU(Task):
         prompt = f"Utterance: {entry['text']}"
         return prompt
     
-    def get_answer(self, entry) -> str:
-        """
-        Get the answer for a given entry.
-
-        Args:
-            entry: The entry for which to get the answer.
-
-        Returns:
-            str: The answer.
-        """
-        return self.id_to_label[entry["label"]]

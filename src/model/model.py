@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 from src.task.task import Task
 from src.utils.logger import get_logger 
 
-
+import time
 
 # try to import vllm
 try:
@@ -15,6 +15,13 @@ try:
     from vllm.model_executor.layers.sampler import Sampler
 except ImportError:
     get_logger().info("VLLM not installed")
+
+from vertexai.preview import tokenization
+import google.generativeai as genai
+from google.generativeai.protos import Content, Part, Model, Schema
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import os
+from tqdm import tqdm
 
 # System prompts for different scenarios
 ICLF_SYSTEM_PROMPT = """You are an useful assistant. Answer the following questions. Feedback will indicate if you answered correctly. You must answer correctly, using previous feedback to make better predictions.{task_description}"""
@@ -25,11 +32,15 @@ STANDARD_SYSTEM_PROMPT = """You are an useful assistant. Answer the following qu
 POTENTIALLY_NEW_ICL_SYSTEM_PROMPT = """You are an useful assistant. Answer the following questions. Feedback will indicate if you answered correctly. You must answer correctly, using previous feedback to make better predictions. Be careful to interpret the feedback correctly: just because the feedback for an answer is positive does not mean it is the correct answer in all cases. You must use the feedback to learn the correct mapping between the questions and the answers.{task_description}"""
 
 # Supported models and their specific configurations
-SUPPORTED_MODELS = ["Llama-3", "Phi-3.5"]
-MODELS_SUPPORTING_SYSTEM_MESSAGE = ["Llama-3", "Phi-3.5"]
+SUPPORTED_MODELS = ["Llama-3", "Phi-3.5", "gemini-1.5-flash", "Qwen2.5"]
+MODELS_SUPPORTING_SYSTEM_MESSAGE = ["Llama-3", "Phi-3.5", "Qwen2.5"]
 MODEL_TO_TERMINATION_TOKEN_STR = {
     "Llama-3": "<|eot_id|>",
     "Phi-3.5": "<|end|>",
+    "Qwen2.5": "<|im_end|>"
+}
+GEMINI_MODEL_TO_TOKENIZER_NAME = {
+    "gemini-1.5-flash": "gemini-1.5-flash-001"
 }
 
 class ModelWrapper(ABC):
@@ -280,6 +291,9 @@ def load_model(model_name: str, icl: bool, icrl: bool, temperature: float, verbo
     except ImportError:
         pass
 
+    if "gemini" in model_name:
+        return GeminiAPIWrapper(model_name, icl, icrl, temperature, verbose)
+
     if vllm_enabled:
         return VLLMModelWrapper(model_name, icl, icrl, temperature, verbose)
         
@@ -300,13 +314,23 @@ class VLLMModelWrapper(ModelWrapper):
         super().__init__(model_name, icl, icrl, temperature, verbose)
 
         # Load model
+        model_args = {
+            "model": model_name,
+            "trust_remote_code": True,
+            "enable_prefix_caching": True,
+            "distributed_executor_backend": "mp",
+            "tensor_parallel_size": torch.cuda.device_count(),
+        }
+
+        if "Qwen2.5" in self.model_family:
+            model_args["rope_scaling"] = {
+                "factor": 4.0,
+                "original_max_position_embeddings": 32768,
+                "type": "yarn"
+            }
+
         self.model = LLM(
-            model=self.model_name,
-            trust_remote_code=True,
-            enable_prefix_caching=True,
-            distributed_executor_backend="mp",
-            tensor_parallel_size=torch.cuda.device_count(),
-            disable_sliding_window=True, # vllm does not support prefix caching and sliding windows
+            **model_args
         )
         if self.verbose:
             get_logger().info(f"Model {model_name} loaded on {torch.cuda.device_count()} GPUs.")
@@ -382,8 +406,7 @@ class VLLMModelWrapper(ModelWrapper):
             Returns:
                 torch.Tensor: The processed logits.
             """
-            # get_logger().info(f"Prompt tokens: {prompt_tokens}")
-            # get_logger().info(f"Generated label tokens: {generated_label_tokens}")
+           
             generated_label_tokens = list(generated_label_tokens)
 
             num_generated_label_tokens = len(generated_label_tokens) 
@@ -403,9 +426,6 @@ class VLLMModelWrapper(ModelWrapper):
 
             # Set all other logits to negative infinity
             logits[~mask] = -float('inf')
-
-            # Re-normalize
-            # logits = logits - torch.max(logits)
 
             return logits
 
@@ -473,7 +493,6 @@ class VLLMModelWrapper(ModelWrapper):
             logits_processors=[self.logit_processor],
             stop_token_ids=[self.model_termination_token_id],
             n=1,
-            use_beam_search=False,
             seed=generation_seed,
             best_of=1
         )
@@ -666,3 +685,214 @@ class VLLMModelTokenizerOnlyWrapper(ModelWrapper):
                 node.children[token] = TrieNode()
             node = node.children[token]
         node.is_end = True
+
+class GeminiAPIWrapper(ModelWrapper):
+    def __init__(self, model_name: str, icl: bool, icrl: bool, temperature: float, verbose: bool):
+        super().__init__(model_name, icl, icrl, temperature, verbose)
+
+        genai.configure(api_key=os.environ["API_KEY"])
+
+        # Model will be loaded when the task is set
+        self.model = None
+        self.system_prompt = None
+        self.model_maximum_length = None
+
+        self.tokenizer_name = GEMINI_MODEL_TO_TOKENIZER_NAME[self.model_family]
+
+        # Logit processor, used for constrained decoding on the task labels
+        self.logit_processor = None
+
+        # Cost debugging
+        self.total_metadata = {
+            "prompt_token_count": 0,
+            "candidates_token_count": 0,
+            "total_token_count": 0,
+            "cached_content_token_count": 0
+        }
+
+        self.max_retries = 3
+        self.retry_delay = 30
+
+        self.tokenizer = tokenization.get_tokenizer_for_model(self.tokenizer_name)
+
+    def _format_messages(self, task_input_list: List[str], model_prediction_list: List[str], task_feedback_list: List[str], task_answer_list: List[str]):
+        if self.verbose:
+            get_logger().info(f"Formatting messages with task input list: {task_input_list}, model prediction list: {model_prediction_list}, task feedback list: {task_feedback_list}, task answer list: {task_answer_list}")
+        messages = []
+        i = 0
+        while True:
+            if len(task_input_list) > i:
+                # If the last message was already from the user (i.e., previous feedback or system message), append the new task input to the last message
+                # Otherwise, create a new message
+                if len(messages) > 0 and messages[-1]["role"] == "user":
+                    messages[-1]["parts"][0]["text"] += f"\n\n{task_input_list[i]}"
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "parts": [{"text": task_input_list[i]}]
+                        }
+                    )
+            if len(model_prediction_list) > i:
+                messages.append(
+                    {
+                        "role": "model",
+                        "parts": [{"text": self._format_model_prediction(self.label_to_model_output[model_prediction_list[i]])}]
+                    }
+                )
+            if len(task_feedback_list) > i:
+                messages.append(
+                    {
+                        "role": "user",
+                        "parts": [{"text": self._format_feedback(task_feedback_list[i], model_prediction_list[i])}]
+                    }
+                )
+            if len(task_answer_list) > i:
+                messages.append(
+                    {
+                        "role": "model",
+                        "parts": [{"text": self._format_model_prediction(task_answer_list[i])}]
+                    }
+                )
+            i += 1
+            if i >= len(task_input_list) and i >= len(model_prediction_list) and i >= len(task_feedback_list) and i >= len(task_answer_list):
+                break
+
+        return messages
+
+
+    def set_task(self, task: Task):
+        super().set_task(task)
+
+        # Set correct system message 
+        task_description = f"\n{self.task_description}"
+        self.system_prompt = (STANDARD_SYSTEM_PROMPT if not self.icl else (ICLF_SYSTEM_PROMPT if self.icrl else ICL_SYSTEM_PROMPT)).format(
+            task_description=task_description,
+        )
+        enum = [f"{self.task_prediction_prefix} {label}" for label in self.task_labels]
+
+
+            
+        self.model_output_to_label = {enum_elem: label for enum_elem, label in zip(enum, self.task_labels)}
+        self.label_to_model_output = {label: label for enum_elem, label in zip(enum, self.task_labels)}
+
+        response_schema = {
+            "type": "STRING",
+            "enum": enum,
+        }
+
+        self.generation_config = genai.GenerationConfig(
+            candidate_count=1,
+            temperature=self.temperature,
+            response_mime_type="text/x.enum",
+            response_schema=response_schema,
+        )
+
+        self.model = genai.GenerativeModel(
+            self.model_name,
+            generation_config=self.generation_config,
+            system_instruction=self.system_prompt
+        )    
+    
+    def get_maximum_length(self):
+        if self.model_maximum_length is None:
+            model = genai.get_model(f"models/{self.model_name}")
+            self.model_maximum_length = model.input_token_limit
+
+        return self.model_maximum_length
+
+    def get_number_tokens(self, messages):
+        number_tokens = self.tokenizer.count_tokens(messages).total_tokens
+        return number_tokens
+    
+    def predict_labels(self, task_prompts: List[str], generation_seed: int, force_verbose=False): # seed can't be used in Gemini API, currently
+        assert self.model is not None, "Task not set"
+
+        messages_list = [
+            self._format_messages(self.past_task_input_list + [task_prompt], self.past_model_prediction_list, self.past_task_feedback_list, self.past_task_answer_list)
+            for task_prompt in task_prompts
+        ]
+
+        predicted_labels = []
+        # if len(messages_list) > 0:
+        #     cache_tokens = self.get_number_tokens(messages_list[0][:-1])
+            # if cache_tokens > 32000:
+            #     self.num_cache_tokens += cache_tokens
+            #     messages_list = [messages[-1:] for messages in messages_list]
+        if self.verbose or force_verbose:
+            get_logger().info(f"Predicting label for prompts:")
+            for i, prompt in enumerate(task_prompts):
+                get_logger().info(f"Prompt {i+1}:")
+                get_logger().info(f"- '{prompt}'")
+                get_logger().info("")  # empty line for better separation
+            get_logger().info(f"Messages list:")
+            for i, messages in enumerate(messages_list):
+                get_logger().info(f"Messages for Prompt {i+1}:")
+                get_logger().info(f"- {messages}")
+                get_logger().info("")  # empty line for better separation
+
+        for messages in tqdm(messages_list, leave=False, desc="Predicting labels"):    
+            for retry_count in range(self.max_retries):
+                try:
+                    response = self.model.generate_content(
+                        messages,
+                        safety_settings={
+                            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                        })
+                    
+                    predicted_label = self.model_output_to_label[response.text.strip()]
+                    predicted_labels.append(predicted_label)
+                    
+                    # Update metadata
+                    metadata = response.usage_metadata
+                    self.total_metadata["prompt_token_count"] += metadata.prompt_token_count
+                    self.total_metadata["candidates_token_count"] += metadata.candidates_token_count
+                    self.total_metadata["total_token_count"] += metadata.total_token_count
+                    self.total_metadata["cached_content_token_count"] += metadata.cached_content_token_count
+                    
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    if retry_count < self.max_retries - 1:  # Don't sleep on last attempt
+                        if self.verbose or force_verbose:
+                            get_logger().warning(f"API request failed (attempt {retry_count + 1}/{self.max_retries}): {str(e)}")
+                            get_logger().info(f"Waiting {self.retry_delay} seconds before retrying...")
+                            # Show question and response
+                            get_logger().info(f"Question: {messages}")
+                            get_logger().info(f"Response: {response}")
+
+                
+
+                        # If the reason is PROHIBITED_CONTENT, we can't retry
+                        if 'response' in locals() and hasattr(response, "prompt_feedback") and hasattr(response.prompt_feedback, "block_reason"):
+                            # Show block reason
+                            get_logger().error(f"Prompt feedback block reason: {response.prompt_feedback.block_reason}")
+                            get_logger().error("Prompt feedback indicates prohibited content. In this case the prompt is unsafe to the model. We answer with a default value.")
+
+                            # There is this inappropriate in the one specific prompt. In this case, we just answer with label 0 (wrong label) so that will never be used again.
+                            if "inappropriate_content_here_to_modify_each_time" in messages[-1]["parts"][0]["text"]:
+                                predicted_labels.append(self.task_labels[0])
+                                break
+                        
+                        time.sleep(self.retry_delay)
+
+
+                    else:
+                        get_logger().error(f"API request failed after {self.max_retries} attempts: {str(e)}")
+                        raise
+
+        get_logger().info(f"Total metadata: {self.total_metadata}")
+
+        if self.verbose or force_verbose:
+            # Given each prompt, show the prompt and the label
+            for i in range(len(task_prompts)):
+                get_logger().info(f"Predicted label for prompt {task_prompts[i]}: '{predicted_labels[i]}'")
+
+        # Assert the predicted labels are in the task labels
+        for predicted_label in predicted_labels:
+            assert predicted_label in self.task_labels, f"Predicted label {predicted_label} not in task labels {self.task_labels}"
+
+        return predicted_labels

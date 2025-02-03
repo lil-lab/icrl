@@ -16,8 +16,31 @@ def get_experiment_dir(args):
     Returns:
         str: The directory path for the experiment.
     """
-    return os.path.join(get_data_dir(), f"{args.model_name}", f"{args.task_name}", f"{args.max_context_examples}", f"{args.icrl}", f"{args.context_strategy_name}_{args.approximate_context_sampling_method}_{str(args.max_contexts)}" if args.context_strategy_name.startswith("approximate") else f"{args.context_strategy_name}", f"{args.context_p_keep}", f"{args.icrl_omit_feedback}", f"{args.icrl_flip_feedback}" if not args.icrl_flip_feedback else f"{args.icrl_flip_feedback}_{args.icrl_flip_feedback_prob}" , f"{args.temperature}", f"{args.training_seed}")
+    context_stategy_str = f"{args.context_strategy_name}"
+    if args.context_strategy_name.startswith("approximate"):
+        context_stategy_str += f"_{args.approximate_context_sampling_method}_{str(args.max_contexts)}"
+    elif args.context_strategy_name.startswith("ucb"):
+        context_stategy_str += f"_{args.ucb_alpha}"
+    elif "reset" in args.context_strategy_name:
+        context_stategy_str += f"_reset{args.prob_reset}"
+    elif "mixed" in args.context_strategy_name:
+        context_stategy_str += f"_explor{args.p_exploration}"
 
+    if args.exemplars_per_label > 0:
+        context_stategy_str += f"_exemplars{args.exemplars_per_label}"
+
+    return os.path.join(
+        get_data_dir(), 
+        f"{args.model_name}", 
+        f"{args.task_name}", 
+        f"{args.max_context_examples}", 
+        f"{args.icrl}", 
+        f"{context_stategy_str}",
+        f"{args.context_p_keep}", 
+        f"{args.icrl_omit_feedback}", 
+        f"{args.icrl_flip_feedback}" if not args.icrl_flip_feedback else f"{args.icrl_flip_feedback}_{args.icrl_flip_feedback_prob}" , 
+        f"{args.temperature}", 
+        f"{args.training_seed}")
 
 DATA_FILENAME = "data.pickle"
 RESULTS_FILENAME = "results.json"
@@ -353,6 +376,7 @@ class ExperimentContextManager(AbstractContextManager):
         self.data_manager = ExperimentDataManager(args)
         # If steps data not empty, raise an error (to avoid overwriting)
         if len(self.data_manager.data["steps"]) > 0: 
+            get_logger().info(f"Data already exists in {self.data_manager.experiment_dir}.")
             raise ValueError(f"Data already exists in {self.data_manager.experiment_dir}.")
         self.save_interval = save_interval
         self.new_step_data: Dict[int, StepData] = dict()

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import List, Tuple
 import numpy as np
+from collections import defaultdict
 
 from src.utils.logger import get_logger
 
@@ -20,6 +21,7 @@ class ContextGenerator(ABC):
         """
         self.max_examples = max_examples
         self.verbose = verbose
+        self.metrics_to_report = dict()
 
     @abstractmethod
     def generate(self, training_task_prompts, training_model_predictions, training_task_feedbacks, training_task_answers, training_task_accuracies) -> Tuple[List[str], List[str], List[int], List[str], List[bool]]:
@@ -45,7 +47,7 @@ class ContextGenerator(ABC):
         Returns:
             None
         """
-        return None
+        return deepcopy(self.metrics_to_report)
 
 
 class RandomContextGenerator(ContextGenerator, ABC):
@@ -317,6 +319,40 @@ class RandomContextGeneratorBiasedEndOnlyPositive(RandomContextGeneratorBiasedEn
         return super().generate(filtered_training_task_prompts, filtered_training_model_predictions, filtered_training_task_feedbacks, filtered_training_task_answers, filtered_training_task_accuracies)
 
 
+class RandomContextGeneratorBiasedEndOnlyNegative(RandomContextGeneratorBiasedEnd):
+    """
+    Random context generator biased towards the end, keeping only positive feedback examples.
+    """
+    def generate(self, training_task_prompts, training_model_predictions, training_task_feedbacks, training_task_answers, training_task_accuracies) -> Tuple[List[str], List[str], List[int], List[str], List[bool]]:
+        """
+        Generate context from training data, keeping only positive feedback examples.
+
+        Args:
+            training_task_prompts (list): List of training task prompts.
+            training_model_predictions (list): List of training model predictions.
+            training_task_feedbacks (list): List of training task feedbacks.
+            training_task_answers (list): List of training task answers.
+            training_task_accuracies (list): List of training task accuracies.
+
+        Returns:
+            Tuple: Generated context consisting of prompts, predictions, feedbacks, answers, and accuracies.
+        """
+        assert self.rng is not None
+
+        # Find the indices of the negative feedback
+        negative_indices = [i for i, feedback in enumerate(training_task_feedbacks) if feedback == 0]
+        
+        # Keep only the training examples with negative feedback
+        filtered_training_task_prompts = [training_task_prompts[i] for i in negative_indices]
+        filtered_training_model_predictions = [training_model_predictions[i] for i in negative_indices]
+        filtered_training_task_feedbacks = [training_task_feedbacks[i] for i in negative_indices]
+        filtered_training_task_answers = [training_task_answers[i] for i in negative_indices]
+        filtered_training_task_accuracies = [training_task_accuracies[i] for i in negative_indices]
+
+        # Call the parent class to do the rest of the work, exactly like before, but with the filtered data with only negative feedback
+        return super().generate(filtered_training_task_prompts, filtered_training_model_predictions, filtered_training_task_feedbacks, filtered_training_task_answers, filtered_training_task_accuracies)
+
+
 class ApproximateContextGenerator(ContextGenerator, ABC):
     """
     Abstract base class for approximate context generators.
@@ -525,7 +561,7 @@ class ExactApproximateContextGeneratorOnlyPositive(ExactApproximateContextGenera
         return super().generate(filtered_training_task_prompts, filtered_training_model_predictions, filtered_training_task_feedbacks, filtered_training_task_answers, filtered_training_task_accuracies)
 
 
-def load_context_generator(context_generator_name: str, max_examples: int, p_keep: float, max_contexts: int, approximate_context_sampling_method: str, verbose: bool) -> RandomContextGenerator:
+def load_context_generator(context_generator_name: str, max_examples: int, p_keep: float, max_contexts: int, approximate_context_sampling_method: str, ucb_alpha: float, prob_reset: float, p_exploration: float, verbose: bool) -> RandomContextGenerator:
     """
     Load the appropriate context generator based on the provided parameters.
 
@@ -550,6 +586,8 @@ def load_context_generator(context_generator_name: str, max_examples: int, p_kee
         return RandomContextGeneratorBiasedStartOnlyPositive(max_examples, p_keep, verbose)
     elif context_generator_name == "random_biased_end_only_positive":
         return RandomContextGeneratorBiasedEndOnlyPositive(max_examples, p_keep, verbose)
+    elif context_generator_name == "random_biased_end_only_negative":
+        return RandomContextGeneratorBiasedEndOnlyNegative(max_examples, p_keep, verbose)
     elif context_generator_name == "random_unbiased_only_positive":
         return RandomContextGeneratorUnbiasedOnlyPositive(max_examples, p_keep, verbose)  
     elif context_generator_name == "random_unbiased_only_negative":
